@@ -41,14 +41,15 @@ def test_summarize_and_filters():
 
 def test_snapshots_and_export(tmp_path, monkeypatch):
     monkeypatch.setenv("SNAP_PATH", str(tmp_path / "s.sqlite"))
+    client.cookies.set("fs_vid", "tvisitor")
     from app.main import run_pipeline
 
-    d1 = run_pipeline("python", "Bengaluru")
+    d1 = run_pipeline("python", "Bengaluru", visitor="tvisitor")
     assert d1["run_id"]
-    runs = store.list_runs()
+    runs = store.list_runs(visitor="tvisitor")
     assert len(runs) == 1 and runs[0]["n"] == 3
-    d2 = run_pipeline("python", "Bengaluru")
-    prev = store.previous_run("python", "Bengaluru", d2["run_id"])
+    d2 = run_pipeline("python", "Bengaluru", visitor="tvisitor")
+    prev = store.previous_run("python", "Bengaluru", d2["run_id"], visitor="tvisitor")
     assert prev and prev["id"] == d1["run_id"]
     assert store.score_deltas(d2["cards"], prev["cards"])  # same fixtures overlap
     r = client.get("/export.csv", params={"role": "python", "run_id": d1["run_id"]})
@@ -60,17 +61,19 @@ def test_snapshots_and_export(tmp_path, monkeypatch):
 def test_history_reopens_same_ui(tmp_path, monkeypatch):
     """History entries reopen the SAME full pages — no separate mini UI."""
     monkeypatch.setenv("SNAP_PATH", str(tmp_path / "h.sqlite"))
+    client.cookies.set("fs_vid", "tvisitor")
     from app.main import run_pipeline
     from app.agent import verify_paste
 
-    d1 = run_pipeline("python", "Bengaluru")
+    d1 = run_pipeline("python", "Bengaluru", visitor="tvisitor")
     v = verify_paste("hello world test message about a job")
     import uuid
 
     from app import store as _store
 
     vid = _store.save_run("pasted message", "—", v["mode"], [v["card"]],
-                          {"kind": "verify", "brain": v["brain"], "spent": v["spent"], "trace": v["trace"]})
+                          {"kind": "verify", "brain": v["brain"], "spent": v["spent"], "trace": v["trace"]},
+                          visitor="tvisitor")
     search_page = client.get(f"/history/{d1['run_id']}").text
     assert "Why this score" in search_page and "snapshot" not in search_page.lower().replace("snapshots", "")
     verdict_page = client.get(f"/history/{vid}").text
@@ -122,3 +125,30 @@ def test_cache_evicts_expired(tmp_path, monkeypatch):
     c.close()
     _cache.put("new", {"y": 2})
     assert _cache.get("old") is None and _cache.get("new") == {"y": 2}
+
+
+def test_visitor_isolation(tmp_path, monkeypatch):
+    """Two browsers, two worlds: histories, profiles, and run URLs don't leak."""
+    from fastapi.testclient import TestClient as TC
+
+    monkeypatch.setenv("SNAP_PATH", str(tmp_path / "iso.sqlite"))
+    from app.main import app as _app
+    from app import store as _store
+
+    a, b = TC(_app), TC(_app)
+    ra = a.post("/verify", data={"text": "hello world test message about a job"})
+    assert ra.status_code == 200 and ra.cookies.get("fs_vid")
+    assert "No saved checks yet" not in a.get("/history").text
+    assert "No saved checks yet" in b.get("/history").text  # judge-fresh
+    import re as _re
+
+    rid = _re.search(r'name="run_id" value="(\d+)"', ra.text).group(1)
+    assert b.get(f"/history/{rid}").status_code == 200  # renders, but...
+    # ...b cannot see a's run: missing page (no leak of verdict content)
+    assert "Why I think so" not in b.get(f"/history/{rid}").text
+    assert "Why I think so" in a.get(f"/history/{rid}").text
+    # profiles isolated too
+    assert _store.get_profile("v-a") is None
+    _store.save_profile("r.pdf", ["python"], "fresher", "x" * 300, visitor="v-a")
+    assert _store.get_profile("v-b") is None
+    assert _store.get_profile("v-a")["skills"] == ["python"]

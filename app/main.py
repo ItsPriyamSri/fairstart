@@ -9,11 +9,27 @@ from fastapi.templating import Jinja2Templates
 from . import config, interview, resume, scoring, store
 from .agent import chat_answer, fetch_url_text, run_agent, verify_paste
 
-app = FastAPI(title="FirstJob Verifier")
+app = FastAPI(title="FairStart")
 BASE = os.path.dirname(os.path.dirname(__file__))
 templates = Jinja2Templates(directory=os.path.join(BASE, "templates"))
 if os.path.isdir(os.path.join(BASE, "static")):
     app.mount("/static", StaticFiles(directory=os.path.join(BASE, "static")), name="static")
+
+
+@app.middleware("http")
+async def visitor_cookie(request: Request, call_next):
+    """Anonymous per-browser ID: every visitor gets a fresh history, no login.
+    Judges land on an empty page; your prep stays yours."""
+    vid = request.cookies.get("fs_vid") or ""
+    new = False
+    if not vid or len(vid) > 64 or not vid.replace("_", "").replace("-", "").isalnum():
+        vid = uuid.uuid4().hex[:16]
+        new = True
+    request.state.visitor = vid
+    resp = await call_next(request)
+    if new:
+        resp.set_cookie("fs_vid", vid, max_age=31536000, httponly=True, samesite="lax")
+    return resp
 
 
 def live_mode() -> bool:
@@ -58,13 +74,14 @@ def apply_filters(cards: list[dict], hide_risky: bool, hide_senior: bool) -> lis
     return out
 
 
-def run_pipeline(role: str, location: str) -> dict:
+def run_pipeline(role: str, location: str, visitor: str = "anon") -> dict:
     """One agentic run: plan -> act (SerpApi tools) -> synthesize -> snapshot."""
     data = run_agent(role, location)
-    enrich(data["cards"])
+    enrich(data["cards"], visitor)
     try:
         run_id = store.save_run(role, location, data["mode"], data["cards"],
-            {"kind": "search", "brain": data.get("brain", ""), "spent": data.get("spent", 0), "trace": data.get("trace", [])})
+            {"kind": "search", "brain": data.get("brain", ""), "spent": data.get("spent", 0), "trace": data.get("trace", [])},
+            visitor=visitor)
     except Exception:
         run_id = None
     data["summary"] = summarize(data["cards"])
@@ -72,11 +89,11 @@ def run_pipeline(role: str, location: str) -> dict:
     return data
 
 
-def enrich(cards: list[dict]) -> None:
+def enrich(cards: list[dict], visitor: str = "anon") -> None:
     """Resume Match% + interview prep topics on each card (all local, free)."""
     profile = None
     try:
-        profile = store.get_profile()
+        profile = store.get_profile(visitor)
     except Exception:
         pass
     for c in cards:
@@ -109,7 +126,8 @@ def search_page(
     hide_risky: bool = False,
     hide_senior: bool = False,
 ):
-    data = run_pipeline(role.strip() or "python", location.strip() or "Bengaluru")
+    data = run_pipeline(role.strip() or "python", location.strip() or "Bengaluru",
+                        visitor=request.state.visitor)
     data["cards"] = apply_filters(data["cards"], hide_risky, hide_senior)
     data["summary"] = summarize(data["cards"])
     data["hide_risky"] = hide_risky
@@ -119,18 +137,20 @@ def search_page(
 
 @app.get("/api/search")
 def search_api(
+    request: Request,
     role: str = Query("python", max_length=80),
     location: str = Query("Bengaluru", max_length=80),
 ):
-    return JSONResponse(run_pipeline(role.strip() or "python", location.strip() or "Bengaluru"))
+    return JSONResponse(run_pipeline(role.strip() or "python", location.strip() or "Bengaluru",
+                                      visitor=request.state.visitor))
 
 
 @app.get("/export.csv")
-def export_csv(run_id: int = Query(0)):
+def export_csv(request: Request, run_id: int = Query(0)):
     import csv
     import io
 
-    run = store.get_run(run_id)
+    run = store.get_run(run_id, request.state.visitor)
     if not run:
         return JSONResponse({"error": "snapshot not found"}, status_code=404)
     buf = io.StringIO()
@@ -161,10 +181,11 @@ async def verify_page(request: Request):
                                           {"mode": "LIVE" if live_mode() else "FIXTURE",
                                            "form_error": "Paste a message first."})
     card = data["card"]
-    _enrich_paste_card(card)
+    _enrich_paste_card(card, request.state.visitor)
     try:
         data["run_id"] = store.save_run("pasted message", "—", data["mode"], [data["card"]],
-            {"kind": "verify", "brain": data.get("brain", ""), "spent": data.get("spent", 0), "trace": data.get("trace", [])})
+            {"kind": "verify", "brain": data.get("brain", ""), "spent": data.get("spent", 0), "trace": data.get("trace", [])},
+            visitor=request.state.visitor)
     except Exception:
         data["run_id"] = None
     data["thread_id"] = uuid.uuid4().hex[:8]
@@ -188,12 +209,12 @@ async def chat_page(request: Request):
     except ValueError:
         return templates.TemplateResponse(request, "index.html",
                                           {"mode": "LIVE" if live_mode() else "FIXTURE"})
-    run = store.get_run(run_id)
+    run = store.get_run(run_id, request.state.visitor)
     if not run or not (0 <= idx < len(run["cards"])):
         return templates.TemplateResponse(request, "index.html",
                                           {"mode": "LIVE" if live_mode() else "FIXTURE"})
     thread_id = form.get("thread_id") or "t0"
-    data = chat_answer(thread_id, run["cards"][idx], form.get("question", ""))
+    data = chat_answer(f"{request.state.visitor}:{thread_id}", run["cards"][idx], form.get("question", ""))
     card = dict(run["cards"][idx])
     card["summary"] = {"bullets": card.get("reasons", [])}
     return templates.TemplateResponse(request, "verdict.html",
@@ -221,9 +242,11 @@ async def verify_url_page(request: Request):
                                           {"mode": "LIVE" if live_mode() else "FIXTURE",
                                            "form_error": "Could not judge that page — paste the text instead."})
     data["card"]["source_url"] = fetched["final_url"]
+    _enrich_paste_card(data["card"], request.state.visitor)
     try:
         data["run_id"] = store.save_run("posting URL", fetched["final_url"][:80], data["mode"], [data["card"]],
-            {"kind": "verify", "brain": data.get("brain", ""), "spent": data.get("spent", 0), "trace": data.get("trace", [])})
+            {"kind": "verify", "brain": data.get("brain", ""), "spent": data.get("spent", 0), "trace": data.get("trace", [])},
+            visitor=request.state.visitor)
     except Exception:
         data["run_id"] = None
     data["thread_id"] = uuid.uuid4().hex[:8]
@@ -235,7 +258,7 @@ async def verify_url_page(request: Request):
 @app.get("/profile", response_class=HTMLResponse)
 def profile_page(request: Request):
     return templates.TemplateResponse(request, "profile.html",
-                                      {"profile": store.get_profile(),
+                                      {"profile": store.get_profile(request.state.visitor),
                                        "mode": "LIVE" if live_mode() else "FIXTURE"})
 
 
@@ -243,7 +266,7 @@ def profile_page(request: Request):
 async def profile_upload(request: Request):
     form = dict(await request.form())
     up = form.get("resume")
-    data = {"profile": store.get_profile(), "mode": "LIVE" if live_mode() else "FIXTURE"}
+    data = {"profile": store.get_profile(request.state.visitor), "mode": "LIVE" if live_mode() else "FIXTURE"}
     if up is None or not hasattr(up, "read"):
         data["form_error"] = "Choose a PDF file first."
         return templates.TemplateResponse(request, "profile.html", data)
@@ -254,8 +277,9 @@ async def profile_upload(request: Request):
         return templates.TemplateResponse(request, "profile.html", data)
     found = resume.extract_skills(parsed["text"])
     store.save_profile(getattr(up, "filename", "resume.pdf") or "resume.pdf",
-                       found["skills"], found["level"], parsed["text"])
-    data["profile"] = store.get_profile()
+                       found["skills"], found["level"], parsed["text"],
+                       visitor=request.state.visitor)
+    data["profile"] = store.get_profile(request.state.visitor)
     data["saved"] = True
     return templates.TemplateResponse(request, "profile.html", data)
 
@@ -267,16 +291,16 @@ async def chat_api(request: Request):
         run_id, idx = int(body.get("run_id", 0)), int(body.get("idx", 0))
     except ValueError:
         return JSONResponse({"error": "bad run_id/idx"}, status_code=400)
-    run = store.get_run(run_id)
+    run = store.get_run(run_id, request.state.visitor)
     if not run or not (0 <= idx < len(run["cards"])):
         return JSONResponse({"error": "snapshot not found"}, status_code=404)
-    return JSONResponse(chat_answer(body.get("thread_id") or "t0", run["cards"][idx],
-                                    body.get("question", "")))
+    return JSONResponse(chat_answer(f"{request.state.visitor}:{body.get('thread_id') or 't0'}",
+                                    run["cards"][idx], body.get("question", "")))
 
 
 @app.get("/history", response_class=HTMLResponse)
 def history_page(request: Request):
-    return templates.TemplateResponse(request, "history.html", {"runs": store.list_runs()})
+    return templates.TemplateResponse(request, "history.html", {"runs": store.list_runs(visitor=request.state.visitor)})
 
 
 @app.get("/history/{rid}", response_class=HTMLResponse)
@@ -284,9 +308,9 @@ def run_detail(request: Request, rid: int):
     """Reopen a saved check in the SAME full UI (results or verdict + chat)."""
     import uuid as _uuid
 
-    run = store.get_run(rid)
+    run = store.get_run(rid, request.state.visitor)
     if not run:
-        return templates.TemplateResponse(request, "history.html", {"runs": store.list_runs(), "missing": rid})
+        return templates.TemplateResponse(request, "history.html", {"runs": store.list_runs(visitor=request.state.visitor), "missing": rid})
     meta = run.get("meta", {})
     cards = run["cards"]
     if meta.get("kind") == "verify" and len(cards) == 1:
@@ -314,7 +338,7 @@ RUNS: dict[str, dict] = {}
 MAX_RUNS = 20
 
 
-def _start_run(kind: str, **kwargs) -> str:
+def _start_run(kind: str, visitor: str = "anon", **kwargs) -> str:
     import queue
     import threading
     import uuid
@@ -332,23 +356,25 @@ def _start_run(kind: str, **kwargs) -> str:
         try:
             if kind == "search":
                 data = run_agent(kwargs["role"], kwargs["location"], emit=emit)
-                enrich(data["cards"])
+                enrich(data["cards"], visitor)
                 try:
                     data["run_id"] = store.save_run(kwargs["role"], kwargs["location"],
                                                     data["mode"], data["cards"],
                                                     {"kind": "search", "brain": data.get("brain", ""),
-                                                     "spent": data.get("spent", 0), "trace": data.get("trace", [])})
+                                                     "spent": data.get("spent", 0), "trace": data.get("trace", [])},
+                                                    visitor=visitor)
                 except Exception:
                     data["run_id"] = None
                 data["summary"] = summarize(data["cards"])
             else:
                 data = verify_paste(kwargs["text"], emit=emit)
                 if "card" in data:
-                    _enrich_paste_card(data["card"])
+                    _enrich_paste_card(data["card"], visitor)
                     try:
                         data["run_id"] = store.save_run("pasted message", "—", data["mode"], [data["card"]],
                                                         {"kind": "verify", "brain": data.get("brain", ""),
-                                                         "spent": data.get("spent", 0), "trace": data.get("trace", [])})
+                                                         "spent": data.get("spent", 0), "trace": data.get("trace", [])},
+                                                        visitor=visitor)
                     except Exception:
                         data["run_id"] = None
             RUNS[token]["result"] = data
@@ -361,13 +387,11 @@ def _start_run(kind: str, **kwargs) -> str:
     return token
 
 
-def _enrich_paste_card(card: dict) -> None:
-    from urllib.parse import quote_plus
-
+def _enrich_paste_card(card: dict, visitor: str = "anon") -> None:
     card["prep_role"] = interview.role_for(card.get("description", ""))
     card["prep"] = interview.TOPICS[card["prep_role"]][:3]
     try:
-        profile = store.get_profile()
+        profile = store.get_profile(visitor)
     except Exception:
         profile = None
     card["match"] = resume.match(card.get("description", ""), profile) if profile else None
@@ -378,7 +402,7 @@ async def go_search(request: Request):
     form = dict(await request.form())
     role = (form.get("role") or "python").strip()[:80] or "python"
     location = (form.get("location") or "Bengaluru").strip()[:80] or "Bengaluru"
-    token = _start_run("search", role=role, location=location)
+    token = _start_run("search", request.state.visitor, role=role, location=location)
     return templates.TemplateResponse(request, "progress.html",
                                       {"token": token, "title": f"{role} in {location}", "kind": "search"})
 
@@ -390,7 +414,7 @@ async def go_verify(request: Request):
     if not text:
         return templates.TemplateResponse(request, "index.html",
                                           {"mode": "LIVE" if live_mode() else "FIXTURE"})
-    token = _start_run("verify", text=text[:8000])
+    token = _start_run("verify", request.state.visitor, text=text[:8000])
     return templates.TemplateResponse(request, "progress.html",
                                       {"token": token, "title": "your message", "kind": "verify"})
 

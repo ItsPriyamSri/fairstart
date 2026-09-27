@@ -18,10 +18,11 @@ CREATE TABLE IF NOT EXISTS runs (
   location TEXT NOT NULL,
   mode TEXT NOT NULL,
   cards TEXT NOT NULL,
-  meta TEXT NOT NULL DEFAULT '{}'
+  meta TEXT NOT NULL DEFAULT '{}',
+  visitor TEXT NOT NULL DEFAULT 'anon'
 );
 CREATE TABLE IF NOT EXISTS profile (
-  id INTEGER PRIMARY KEY CHECK (id = 1),
+  visitor TEXT PRIMARY KEY,
   updated REAL NOT NULL,
   filename TEXT NOT NULL,
   skills TEXT NOT NULL,
@@ -37,14 +38,20 @@ def _conn():
     path = os.getenv("SNAP_PATH", "snapshots.sqlite")
     c = sqlite3.connect(path)
     c.executescript(SCHEMA)
-    try:  # migrate DBs created before the meta column existed
-        c.execute("ALTER TABLE runs ADD COLUMN meta TEXT NOT NULL DEFAULT '{}'")
-    except Exception:
-        pass
+    for stmt in (
+        "ALTER TABLE runs ADD COLUMN meta TEXT NOT NULL DEFAULT '{}'",
+        "ALTER TABLE runs ADD COLUMN visitor TEXT NOT NULL DEFAULT 'anon'",
+        "ALTER TABLE profile ADD COLUMN visitor TEXT NOT NULL DEFAULT 'anon'",
+    ):
+        try:  # migrate DBs created before these columns existed
+            c.execute(stmt)
+        except Exception:
+            pass
     return c
 
 
-def save_run(role: str, location: str, mode: str, cards: list[dict], meta: dict | None = None) -> int:
+def save_run(role: str, location: str, mode: str, cards: list[dict], meta: dict | None = None,
+             visitor: str = "anon") -> int:
     slim = [
         {
             "title": c["title"],
@@ -78,8 +85,8 @@ def save_run(role: str, location: str, mode: str, cards: list[dict], meta: dict 
     c = _conn()
     try:
         cur = c.execute(
-            "INSERT INTO runs (ts, role, location, mode, cards, meta) VALUES (?,?,?,?,?,?)",
-            (time.time(), role, location, mode, json.dumps(slim), json.dumps(meta or {})),
+            "INSERT INTO runs (ts, role, location, mode, cards, meta, visitor) VALUES (?,?,?,?,?,?,?)",
+            (time.time(), role, location, mode, json.dumps(slim), json.dumps(meta or {}), visitor),
         )
         c.commit()
         # Bound growth: keep only the latest 50 runs.
@@ -90,12 +97,12 @@ def save_run(role: str, location: str, mode: str, cards: list[dict], meta: dict 
         c.close()
 
 
-def list_runs(limit: int = 20) -> list[dict]:
+def list_runs(limit: int = 20, visitor: str = "anon") -> list[dict]:
     c = _conn()
     try:
         rows = c.execute(
-            "SELECT id, ts, role, location, mode, cards, meta FROM runs ORDER BY id DESC LIMIT ?",
-            (limit,),
+            "SELECT id, ts, role, location, mode, cards, meta FROM runs WHERE visitor=? ORDER BY id DESC LIMIT ?",
+            (visitor, limit),
         ).fetchall()
     finally:
         c.close()
@@ -121,12 +128,19 @@ def list_runs(limit: int = 20) -> list[dict]:
     return out
 
 
-def get_run(rid: int) -> dict | None:
+def get_run(rid: int, visitor: str | None = None) -> dict | None:
+    """Fetch a run; when visitor is given, other visitors' runs are invisible (404)."""
     c = _conn()
     try:
-        row = c.execute(
-            "SELECT id, ts, role, location, mode, cards, meta FROM runs WHERE id=?", (rid,)
-        ).fetchone()
+        if visitor is None:
+            row = c.execute(
+                "SELECT id, ts, role, location, mode, cards, meta FROM runs WHERE id=?", (rid,)
+            ).fetchone()
+        else:
+            row = c.execute(
+                "SELECT id, ts, role, location, mode, cards, meta FROM runs WHERE id=? AND visitor=?",
+                (rid, visitor),
+            ).fetchone()
     finally:
         c.close()
     if not row:
@@ -142,13 +156,13 @@ def get_run(rid: int) -> dict | None:
             "cards": json.loads(cards), "meta": meta}
 
 
-def previous_run(role: str, location: str, before_id: int) -> dict | None:
+def previous_run(role: str, location: str, before_id: int, visitor: str = "anon") -> dict | None:
     c = _conn()
     try:
         row = c.execute(
             "SELECT id, ts, role, location, mode, cards FROM runs "
-            "WHERE role=? AND location=? AND id<? ORDER BY id DESC LIMIT 1",
-            (role, location, before_id),
+            "WHERE role=? AND location=? AND id<? AND visitor=? ORDER BY id DESC LIMIT 1",
+            (role, location, before_id, visitor),
         ).fetchone()
     finally:
         c.close()
@@ -171,27 +185,43 @@ def score_deltas(current: list[dict], prev: list[dict]) -> dict[str, int]:
     return {key(x): x["score"] - old[key(x)] for x in current if key(x) in old}
 
 
-def save_profile(filename: str, skills: list, level: str, text: str) -> None:
+def save_profile(filename: str, skills: list, level: str, text: str, visitor: str = "anon") -> None:
     import json as _json
     import time as _time
 
     c = _conn()
     try:
-        c.execute(
-            "REPLACE INTO profile (id, updated, filename, skills, level, text) VALUES (1,?,?,?,?,?)",
-            (_time.time(), filename, _json.dumps(skills), level, text[:20000]),
-        )
+        try:
+            c.execute(
+                "REPLACE INTO profile (visitor, updated, filename, skills, level, text) VALUES (?,?,?,?,?,?)",
+                (visitor, _time.time(), filename, _json.dumps(skills), level, text[:20000]),
+            )
+        except Exception:
+            # Pre-visitor schema (keyed by id): rebuild once, legacy row is disposable.
+            c.execute("DROP TABLE IF EXISTS profile")
+            c.executescript(
+                "CREATE TABLE profile (visitor TEXT PRIMARY KEY, updated REAL NOT NULL,"
+                " filename TEXT NOT NULL, skills TEXT NOT NULL, level TEXT NOT NULL, text TEXT NOT NULL);"
+            )
+            c.execute(
+                "REPLACE INTO profile (visitor, updated, filename, skills, level, text) VALUES (?,?,?,?,?,?)",
+                (visitor, _time.time(), filename, _json.dumps(skills), level, text[:20000]),
+            )
         c.commit()
     finally:
         c.close()
 
 
-def get_profile() -> dict | None:
+def get_profile(visitor: str = "anon") -> dict | None:
     import json as _json
 
     c = _conn()
     try:
-        row = c.execute("SELECT updated, filename, skills, level, text FROM profile WHERE id=1").fetchone()
+        try:
+            row = c.execute("SELECT updated, filename, skills, level, text FROM profile WHERE visitor=?",
+                            (visitor,)).fetchone()
+        except Exception:
+            row = None  # pre-visitor schema: ask for a fresh upload, don't guess
     finally:
         c.close()
     if not row:
