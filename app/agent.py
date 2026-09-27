@@ -318,6 +318,291 @@ def validate_verdicts(verdicts: list[dict], jobs: list, job_ev: dict) -> tuple[l
             fixed.append(det_v[i])
     return fixed, corrections
 
+# ---------------- stateless steps (serverless-proof) ----------------
+# Each step is one unit of work on a plain-JSON state dict. The client
+# carries state between HTTP calls, so ANY instance can continue the run —
+# no background threads, no shared memory, no sticky sessions. run_agent()
+# and verify_paste() below simply drive these steps in-process (tests + local).
+
+def new_search_state(role: str, location: str) -> dict:
+    return {"kind": "search", "role": role, "location": location, "text": "",
+            "mode": "LIVE" if config.SERPAPI_API_KEY else "FIXTURE (recorded, labeled)",
+            "jobs": [], "evidence": [], "companies": [], "verified": [],
+            "spent": 0, "calls": 0, "eid": 0, "errors": [], "trace": [],
+            "budget": 1 + 3 * config.MAX_VERIFY_COMPANIES, "done": False, "result": None}
+
+
+def new_verify_state(text: str) -> dict:
+    return {"kind": "verify", "role": "", "location": "", "text": (text or "")[:8000],
+            "mode": "LIVE" if config.SERPAPI_API_KEY else "FIXTURE (recorded, labeled)",
+            "jobs": [], "evidence": [], "companies": [], "verified": [],
+            "spent": 0, "calls": 0, "eid": 0, "errors": [], "trace": [],
+            "budget": 3, "done": False, "result": None, "claims": None, "fetched_from": []}
+
+
+def _backend(backend=None):
+    return backend or (GeminiBackend() if config.GEMINI_API_KEY else DeterministicBackend())
+
+
+def _pending_company(st: dict) -> str:
+    if st.get("calls", 0) + 3 > st["budget"] + 2 or st.get("spent", 0) + 3 > st["budget"]:
+        return ""
+    for c in st.get("companies", []):
+        if c not in st.get("verified", []):
+            return c
+    return ""
+
+
+def step(st: dict, backend=None) -> list:
+    """Run ONE unit of work, mutate st, return new trace events. Sets st['done']."""
+    backend = _backend(backend)
+    before = len(st["trace"])
+    ctx = {"eid": st.get("eid", 0)}
+    if st["kind"] == "verify" and not st.get("extracted"):
+        _verify_extract_step(st, ctx, backend)
+    elif not st.get("jobs_done") and st["kind"] == "search":
+        _jobs_step(st, ctx, {"role": st.get("role", ""), "location": st.get("location", "")})
+    else:
+        company = ""
+        if st["kind"] == "verify":
+            cl = st.get("claims", {})
+            names = (cl.get("companies", []) + ([cl["brand_hit"]] if cl.get("brand_hit") else []))[:1]
+            if names and names[0] not in st.get("verified", []) and st.get("calls", 0) + 3 <= st["budget"] + 2 and st.get("spent", 0) + 3 <= st["budget"]:
+                company = names[0]
+        else:
+            company = _pending_company(st)
+        if company:
+            _fanout_step(st, ctx, company)
+        elif st["kind"] == "verify":
+            _verify_synthesize_step(st, backend)
+        else:
+            _synthesize_step(st, backend)
+    st["eid"] = ctx["eid"]
+    return st["trace"][before:]
+
+
+def _jobs_step(st: dict, ctx: dict, goal: dict):
+    try:
+        res = tool_jobs_search(goal["role"], goal["location"], ctx)
+        st["spent"] += res.get("spent", 0)
+        st["evidence"].extend(res.get("evidence", []))
+        st["jobs"] = res["jobs"]
+        for j in res["jobs"]:
+            if j["company"] and j["company"] not in st["companies"]:
+                st["companies"].append(j["company"])
+        st["companies"] = st["companies"][:config.MAX_VERIFY_COMPANIES]
+        _rec(st["trace"], None, {"kind": "tool", "tool": "jobs_search",
+                                 "args": {"query": goal["role"], "location": goal["location"]},
+                                 "ok": True, "credits": res.get("spent", 0)})
+    except Exception as e:
+        _rec(st["trace"], None, {"kind": "tool", "tool": "jobs_search", "ok": False,
+                                 "note": f"{type(e).__name__}"})
+        st["errors"].append("Job listings didn't load — showing recorded samples instead.")
+        raw = api.load_fixture("jobs_bengaluru_python.json")
+        st["jobs"] = scoring.dedupe([scoring.normalize_job(j) for j in raw.get("jobs_results", [])])
+        st["mode"] = "FIXTURE (recorded, labeled)"
+    st["jobs_done"] = True
+    st["calls"] = st.get("calls", 0) + 1
+
+
+def _fanout_step(st: dict, ctx: dict, company: str):
+    st["calls"] = st.get("calls", 0) + 3
+    try:
+        res = run_fanout(company, ctx)
+        st["spent"] += res["spent"]
+        st["evidence"].extend(res["evidence"])
+        st["verified"].append(company)
+        bad = [t for t, r in res["results"].items() if "error" in r]
+        _rec(st["trace"], None, {"kind": "fanout", "tool": "news+presence+forums",
+                                 "args": {"company": company}, "ok": not bad,
+                                 "note": f"skipped: {bad}" if bad else "",
+                                 "credits": res["spent"]})
+        if bad:
+            st["errors"].append(f"One check ({', '.join(bad)}) didn't load for {company} — verdict uses the checks that worked.")
+    except Exception as e:
+        _rec(st["trace"], None, {"kind": "fanout", "tool": "news+presence+forums",
+                                 "args": {"company": company}, "ok": False,
+                                 "note": f"{type(e).__name__}"})
+        st["errors"].append(f"Couldn't reach live checks for {company} — judged on the listing text alone.")
+
+
+def _job_ev_map(jobs: list, evidence: list) -> dict:
+    job_ev = {}
+    for i, j in enumerate(jobs):
+        mine = [e for e in evidence if _ev_for_job(e, j, jobs)]
+        by_kind: dict[str, list[str]] = {"posting": [], "news": [], "presence": [], "forums": []}
+        for e in mine:
+            by_kind.setdefault(e["kind"], []).append(e["id"])
+        nums = set()
+        for e in mine:
+            m = re.search(r"E(\d+)", e["id"])
+            if m:
+                nums.add(int(m.group(1)))
+        job_ev[i] = {"news": len(by_kind["news"]), "forums": len(by_kind["forums"]),
+                     "presence": bool(by_kind["presence"]), "ids": [e["id"] for e in mine],
+                     "nums": nums, "by_kind": by_kind}
+    return job_ev
+
+
+def _synthesize_step(st: dict, backend):
+    from . import claims as _cl
+
+    job_ev = _job_ev_map(st["jobs"], st["evidence"])
+    try:
+        verdicts = backend.synthesize(st["jobs"], st["evidence"], job_ev)
+    except Exception:
+        st["errors"].append("Brain hiccup — used the reliable fallback to finish your verdict.")
+        verdicts = DeterministicBackend().synthesize(st["jobs"], st["evidence"], job_ev)
+    verdicts, corrections = validate_verdicts(verdicts, st["jobs"], job_ev)
+    if corrections:
+        _rec(st["trace"], None, {"kind": "validate",
+                                 "note": f"{corrections} verdict(s) failed citation check — deterministic fallback applied"})
+    problems = critique(verdicts, st["jobs"], job_ev, backend)
+    if problems:
+        det_v = {v["job"]: v for v in DeterministicBackend().synthesize(st["jobs"], st["evidence"], job_ev)}
+        swapped = 0
+        for p in problems:
+            i = p.get("job")
+            if isinstance(i, int) and 0 <= i < len(verdicts):
+                for k, v in enumerate(verdicts):
+                    if v["job"] == i and v["reasons"] != det_v.get(i, {}).get("reasons"):
+                        verdicts[k] = det_v[i]
+                        swapped += 1
+                        break
+        _rec(st["trace"], None, {"kind": "reflect",
+                                 "note": f"critic: {len(problems)} issue(s), {swapped} repaired"})
+    _rec(st["trace"], None, {"kind": "synthesis",
+                             "note": f"brain={backend.name}, verdicts={len(verdicts)}, corrections={corrections}"})
+    cards = []
+    for v in verdicts:
+        j = st["jobs"][v["job"]]
+        band = "green" if v["score"] <= 30 else "amber" if v["score"] <= 60 else "red"
+        ev_news = [e for e in st["evidence"] if e["kind"] in ("news", "forums") and _ev_for_job(e, j, st["jobs"])]
+        ev_pres = [e for e in st["evidence"] if e["kind"] == "presence" and _ev_for_job(e, j, st["jobs"])]
+        cl = _cl.extract(f"{j['title']}\n{j['company']}\n{j['description']}")
+        category = _cl.category_for(cl)
+        if category == "clean" and band == "red":
+            category = "scam"
+        proof = bool(ev_pres)
+        cards.append({**j, "score": v["score"], "band": band, "reasons": v["reasons"],
+                      "label": _cl.label_for(v["score"], category, proof=proof),
+                      "category": category, "claims": cl,
+                      "coach": {"opener": coach.opener_for(category),
+                                "cons": coach.cons_for(cl["cues"]),
+                                "closer": coach.closer_for(category)},
+                      "evidence": {"news": [_news_card(e["text"]) for e in ev_news],
+                                   "presence": [_presence_card(e["text"]) for e in ev_pres]},
+                      "summary": llm.grounded_bullets(v["reasons"])})
+    cards.sort(key=lambda c: c["score"])
+    st["result"] = {"cards": cards, "errors": st["errors"], "trace": st["trace"],
+                    "spent": st["spent"], "brain": backend.name, "budget": st["budget"]}
+    st["done"] = True
+
+
+def _verify_extract_step(st: dict, ctx: dict, backend=None):
+    from . import claims as _cl
+
+    text = st.get("text", "")
+    urls = re.findall(r"https?://[^\s)>\]]+", text)[:2]
+    fetched_from = []
+    for u in urls:
+        got = fetch_url_text(u.rstrip(".,"))
+        if got["ok"]:
+            text = (text + "\n\n[Fetched page content]\n" + got["text"])[:8000]
+            fetched_from.append(got["final_url"])
+            _rec(st["trace"], None, {"kind": "tool", "tool": "fetch_url",
+                                     "args": {"url": u[:60]}, "ok": True, "credits": 0})
+        else:
+            _rec(st["trace"], None, {"kind": "tool", "tool": "fetch_url",
+                                     "args": {"url": u[:60]}, "ok": False, "note": got["error"]})
+            st["errors"].append(f"Could not read {u[:60]}: {got['error']}")
+    st["text"] = text
+    st["fetched_from"] = fetched_from
+    st["claims"] = _cl.extract(text)
+    _rec(st["trace"], None, {"kind": "extract", "note": "claim extraction from pasted text"})
+    if (not st["claims"]["companies"] and not st["claims"]["brand_hit"]
+            and config.GEMINI_API_KEY and isinstance(backend, GeminiBackend)):
+        try:
+            parsed = GeminiBackend._json(backend._call(
+                "Extract from this opportunity message as JSON: " + text[:1500], CLAIM_SCHEMA))
+            if parsed and parsed.get("company"):
+                st["claims"]["companies"] = [parsed["company"]]
+        except Exception as e:
+            _rec(st["trace"], None, {"kind": "extract",
+                                     "note": f"LLM cross-check failed ({type(e).__name__}) — deterministic claims kept"})
+    if not st["claims"]["companies"] and not st["claims"]["brand_hit"]:
+        st["jobs"] = []
+        st["companies"] = []
+    else:
+        st["jobs"] = []
+        st["companies"] = []
+    st["extracted"] = True
+
+
+def _verify_synthesize_step(st: dict, backend):
+    from . import claims as _cl
+
+    cl = st["claims"]
+    company = (cl["companies"] + [cl["brand_hit"]] if cl["brand_hit"] else cl["companies"])
+    company = company[0] if company else ""
+    news_items = [e for e in st["evidence"] if e["kind"] == "news"]
+    forum_items = [e for e in st["evidence"] if e["kind"] == "forums"]
+    pres_items = [e for e in st["evidence"] if e["kind"] == "presence"]
+    job = {"title": "Pasted opportunity", "company": company, "location": "—", "via": "pasted message",
+           "posted_at": None, "salary": " ".join(cl["money"][:2]), "schedule": "",
+           "description": st["text"], "apply": [], "share_link": "", "job_id": "", "_dupes": 1}
+    for i, e in enumerate(st["evidence"]):
+        e["id"] = f"E{i + 1}"
+    job_ev = {0: {"news": len(news_items), "forums": len(forum_items), "presence": bool(pres_items),
+                  "ids": [e["id"] for e in st["evidence"]],
+                  "nums": set(range(1, len(st["evidence"]) + 1)),
+                  "by_kind": {"posting": [],
+                              "news": [e["id"] for e in news_items],
+                              "presence": [e["id"] for e in pres_items],
+                              "forums": [e["id"] for e in forum_items]}}}
+    s = scoring.score_paste(job, cl["cues"], news_hits=len(news_items),
+                            has_presence=bool(pres_items), forum_hits=len(forum_items))
+    category = _cl.category_for(cl)
+    label = _cl.label_for(s["score"], category, proof=bool(pres_items))
+    verdicts = [{"job": 0, "score": s["score"],
+                 "reasons": [f"{r} [{job_ev[0]['ids'][0]}]" if job_ev[0]["ids"] else r for r in s["reasons"]]}]
+    verdicts, corrections = validate_verdicts_paste(verdicts, job_ev)
+    issues = critique(verdicts, [job], job_ev, backend)
+    if issues:
+        _rec(st["trace"], None, {"kind": "reflect",
+                                 "note": f"critic flagged {len(issues)} issue(s)"})
+    if corrections:
+        _rec(st["trace"], None, {"kind": "validate", "note": f"{corrections} correction(s) applied"})
+    _rec(st["trace"], None, {"kind": "synthesis",
+                             "note": f"brain={backend.name}, category={category}, label={label}"})
+    from urllib.parse import quote_plus
+
+    from . import interview as _iv
+
+    role_key = _iv.role_for(st["text"])
+    search_role = {"python": "python", "web": "web developer", "frontend": "frontend",
+                   "data": "data analyst", "java": "java"}.get(role_key, "fresher")
+    ev_news = [e for e in st["evidence"] if e["kind"] in ("news", "forums")]
+    ev_pres = [e for e in st["evidence"] if e["kind"] == "presence"]
+    card = {**job, "score": s["score"],
+            "band": "green" if s["score"] <= 30 else "amber" if s["score"] <= 60 else "red",
+            "reasons": verdicts[0]["reasons"] if verdicts else s["reasons"],
+            "label": label, "category": category, "claims": cl,
+            "coach": {"opener": coach.opener_for(category),
+                      "cons": coach.cons_for(cl["cues"]),
+                      "closer": coach.closer_for(category)},
+            "evidence": {"news": [_news_card(e["text"]) for e in ev_news],
+                         "presence": [_presence_card(e["text"]) for e in ev_pres]},
+            "summary": llm.grounded_bullets(verdicts[0]["reasons"] if verdicts else s["reasons"]),
+            "next_steps": NEXT_STEPS,
+            "source_url": st["fetched_from"][0] if st["fetched_from"] else "",
+            "search_role": search_role,
+            "search_link": f"/search?role={quote_plus(search_role)}&location=India"}
+    st["result"] = {"card": card, "errors": st["errors"], "trace": st["trace"],
+                    "spent": st["spent"], "brain": backend.name, "budget": st["budget"]}
+    st["done"] = True
+
+
 # ---------------- loop ----------------
 
 def _rec(trace: list, emit, entry: dict) -> None:
@@ -330,7 +615,7 @@ def _rec(trace: list, emit, entry: dict) -> None:
             pass
 
 
-def run_agent(role: str, location: str, backend=None, emit=None) -> dict:
+def _run_agent_legacy(role: str, location: str, backend=None, emit=None) -> dict:
     """emit(kind, note) fires on every real milestone for SSE progress streaming."""
     backend = backend or (GeminiBackend() if config.GEMINI_API_KEY else DeterministicBackend())
     budget = 1 + 3 * config.MAX_VERIFY_COMPANIES  # 1 jobs + fan-out(news+presence+forums) per company
@@ -554,7 +839,7 @@ NEXT_STEPS = [
 ]
 
 
-def verify_paste(text: str, backend=None, emit=None) -> dict:
+def _verify_paste_legacy(text: str, backend=None, emit=None) -> dict:
     """Paste-and-verify: judge any opportunity message. Budget: ≤3 SerpApi credits."""
     from . import claims as claimlib
 
@@ -769,3 +1054,56 @@ def fetch_url_text(url: str) -> dict:
         return {"ok": True, "text": text, "final_url": str(r.url)}
     except Exception as e:
         return {"ok": False, "error": f"fetch failed ({type(e).__name__}) — paste the text instead"}
+
+
+# ---------------- public drivers (stateless-first) ----------------
+# Default brains run the resumable step() path (serverless-proof, and what
+# /api/advance drives over HTTP). Custom planner brains (tests, experiments)
+# keep the classic next_action loop via the legacy path.
+
+_DEFAULT_BRAINS = None  # resolved lazily to avoid import-order issues
+
+
+def _is_default_brain(backend) -> bool:
+    return backend is None or type(backend) in (DeterministicBackend, GeminiBackend)
+
+
+def run_agent(role: str, location: str, backend=None, emit=None) -> dict:
+    if not _is_default_brain(backend):
+        return _run_agent_legacy(role, location, backend, emit)
+    st = new_search_state(role, location)
+    backend = _backend(backend)
+    for _ in range(12):
+        for ev in step(st, backend):
+            if emit:
+                try:
+                    emit(ev.get("kind", "step"), ev.get("tool") or ev.get("note", ""))
+                except Exception:
+                    pass
+        if st.get("done"):
+            break
+    r = st["result"] or {"cards": [], "errors": st["errors"], "trace": st["trace"],
+                         "spent": st["spent"], "brain": backend.name, "budget": st["budget"]}
+    return {"mode": st["mode"], "role": role, "location": location, **r}
+
+
+def verify_paste(text: str, backend=None, emit=None) -> dict:
+    if not _is_default_brain(backend):
+        return _verify_paste_legacy(text, backend, emit)
+    st = new_verify_state(text)
+    if not (st.get("text") or "").strip():
+        return {"error": "empty message", "trace": []}
+    backend = _backend(backend)
+    for _ in range(8):
+        for ev in step(st, backend):
+            if emit:
+                try:
+                    emit(ev.get("kind", "step"), ev.get("tool") or ev.get("note", ""))
+                except Exception:
+                    pass
+        if st.get("done"):
+            break
+    r = st.get("result")
+    if not r:
+        return {"error": "could not judge that message", "trace": st["trace"]}
+    return {"mode": st["mode"], **r}

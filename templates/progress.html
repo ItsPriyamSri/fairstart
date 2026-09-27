@@ -14,7 +14,7 @@
 <h1>On it — checking <span class="go">{{ title }}</span></h1>
 <p>The agent is working live. This usually takes about 20 seconds — watch it think below. Don't close this tab.</p>
 </section>
-<div class="panel">
+<div class="panel" id="driver" data-kind="{{ kind }}" data-role="{{ role }}" data-location="{{ location }}">
 <h2>Live progress</h2>
 <ol class="stages" id="stages">
 <li data-stage="start"><span class="dot"></span><span class="lbl">Planning the checks</span></li>
@@ -24,6 +24,7 @@
 </ol>
 <p><small>Elapsed: <span id="elapsed">0</span>s · usually about 20 seconds</small></p>
 </div>
+<script type="application/json" id="payload">{{ text|tojson }}</script>
 <div aria-hidden="true">
 <div class="card"><div class="skel" style="height:1.2em;width:60%"></div><div class="skel" style="height:.8em;width:90%;margin-top:.6em"></div><div class="skel" style="height:.8em;width:75%;margin-top:.4em"></div></div>
 <div class="card"><div class="skel" style="height:1.2em;width:45%"></div><div class="skel" style="height:.8em;width:85%;margin-top:.6em"></div></div>
@@ -56,34 +57,61 @@
     reached[stage] = true;
     paint();
   }
-  paint();
-  var es = new EventSource("/stream/{{ token }}");
-  es.onmessage = function () {};
-  es.addEventListener("tool", function (e) { tick("search"); });
-  es.addEventListener("fanout", function (e) { tick("search"); tick("verify"); });
-  es.addEventListener("extract", function (e) { tick("search"); });
-  es.addEventListener("plan", function (e) { tick("search"); });
-  es.addEventListener("validate", function (e) { tick("verify"); tick("judge"); });
-  es.addEventListener("reflect", function (e) { tick("judge"); });
-  es.addEventListener("synthesis", function (e) { tick("judge"); });
-  es.addEventListener("deny", function (e) { tick("judge"); });
-  es.addEventListener("done", function () {
+  function fail(msg) {
     clearInterval(timer);
-    order.forEach(function (s) { reached[s] = true; });
-    paint();
-    setTimeout(function () { window.location.href = "/view/{{ token }}"; }, 450);
-  });
-  es.addEventListener("error", function (e) {
-    try {
-      var d = JSON.parse(e.data || "{}");
-      if (d.detail && d.detail !== "unknown run") {
-        clearInterval(timer);
-        document.querySelector(".panel").insertAdjacentHTML("beforeend",
-          '<p class="err">Something broke: ' + d.detail + ' — <a href="/">try again</a></p>');
-        es.close();
-      }
-    } catch (err) { /* SSE retry heartbeat; ignore */ }
-  });
+    document.querySelector(".panel").insertAdjacentHTML("beforeend",
+      '<p class="err">Something broke: ' + msg + ' — <a href="/">try again</a></p>');
+  }
+  paint();
+  // Stateless drive: each step runs on ANY server instance, state rides along.
+  var driver = document.getElementById("driver");
+  var kind = driver.dataset.kind;
+  var payloadEl = document.getElementById("payload");
+  var body = { role: driver.dataset.role, location: driver.dataset.location };
+  if (kind === "verify") {
+    try { body = { text: JSON.parse(payloadEl.textContent || '""') }; }
+    catch (e) { body = { text: "" }; }
+  }
+  function handleEvents(events) {
+    (events || []).forEach(function (ev) {
+      var k = ev.kind;
+      if (k === "tool" || k === "extract" || k === "plan") tick("search");
+      else if (k === "fanout") { tick("search"); tick("verify"); }
+      else if (k === "validate" || k === "reflect" || k === "synthesis" || k === "deny") { tick("verify"); tick("judge"); }
+    });
+  }
+  function advance(state, guard) {
+    if (guard <= 0) { fail("too many steps — please retry"); return; }
+    fetch("/api/advance", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(state ? { state: state } : body)
+    })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (d.error) { fail(d.error); return; }
+        handleEvents(d.events);
+        if (d.done) {
+          order.forEach(function (s) { reached[s] = true; });
+          paint();
+          fetch("/render/" + kind, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ state: d.state })
+          })
+            .then(function (r) { return r.text(); })
+            .then(function (html) {
+              clearInterval(timer);
+              setTimeout(function () { document.open(); document.write(html); document.close(); }, 450);
+            })
+            .catch(function () { fail("could not load results"); });
+        } else {
+          advance(d.state, guard - 1);
+        }
+      })
+      .catch(function () { fail("network hiccup"); });
+  }
+  advance(null, 12);
 })();
 </script>
 </body>

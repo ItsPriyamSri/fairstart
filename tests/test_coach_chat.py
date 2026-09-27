@@ -86,19 +86,36 @@ def test_premium_ui_wired():
     assert 'id="thread"' in v and 'id="chat-form"' in v and "app.js" in v
 
 
-def test_stream_flow_offline():
+def test_stateless_flow_offline():
+    """Stateless chain: progress page -> /api/advance steps -> /render. Instance-proof."""
     r = client.post("/go/verify", data={"text": "hello world test message about a job"})
-    assert r.status_code == 200 and "EventSource" in r.text and "/stream/" in r.text
-    import re as _re
-
-    token = _re.search(r"/stream/([a-f0-9]+)", r.text).group(1)
-    import threading, time
-
-    for _ in range(60):
-        r2 = client.get(f"/view/{token}")
-        if "Verdict" in r2.text or "LIKELY" in r2.text or "WORTH A LOOK" in r2.text or "UNVERIFIABLE" in r2.text:
+    assert r.status_code == 200 and "/api/advance" in r.text and "skel" in r.text
+    state = None
+    done = False
+    for _ in range(8):
+        payload = {"state": state} if state else {"text": "hello world test message about a job"}
+        d = client.post("/api/advance", json=payload).json()
+        assert "error" not in d, d
+        assert d["events"], "every step must emit real milestones"
+        state = d["state"]
+        if d["done"]:
+            done = True
             break
-        time.sleep(0.5)
-    assert "FairStart" in r2.text
+    assert done and state["result"]
+    page = client.post("/render/verify", json={"state": state}).text
+    assert "Why I think so" in page and 'id="chat-form"' in page
+    # search chain
+    state, done = None, False
+    for _ in range(10):
+        payload = {"state": state} if state else {"role": "python", "location": "Bengaluru"}
+        d = client.post("/api/advance", json=payload).json()
+        assert "error" not in d, d
+        state = d["state"]
+        if d["done"]:
+            done = True
+            break
+    assert done and len(state["result"]["cards"]) == 3
+    page = client.post("/render/search", json={"state": state}).text
+    assert "Why this score" in page
     r3 = client.post("/go/search", data={"role": "python", "location": "Bengaluru"})
-    assert r3.status_code == 200 and "EventSource" in r3.text
+    assert r3.status_code == 200 and "/api/advance" in r3.text

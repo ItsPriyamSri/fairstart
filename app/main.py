@@ -284,6 +284,92 @@ async def profile_upload(request: Request):
     return templates.TemplateResponse(request, "profile.html", data)
 
 
+@app.post("/api/advance")
+async def api_advance(request: Request):
+    """One agent step on client-carried state. Stateless: any instance can
+    continue any run. Returns {state, events, done}."""
+    from app.agent import new_search_state, new_verify_state, step
+
+    body = await request.json() or {}
+    st = body.get("state") or {}
+    try:
+        if not st or st.get("kind") == "search":
+            if not st:
+                st = new_search_state((body.get("role") or "python")[:80],
+                                      (body.get("location") or "Bengaluru")[:80])
+            events = step(st)
+        elif st.get("kind") == "verify":
+            if "extracted" not in st and "text" not in st:
+                st = new_verify_state(body.get("text", ""))
+                if not (st.get("text") or "").strip():
+                    return JSONResponse({"error": "empty message"}, status_code=400)
+            events = step(st)
+        else:
+            return JSONResponse({"error": "unknown run kind"}, status_code=400)
+    except Exception as e:  # noqa: BLE001 — a stuck run must explain, not hang
+        return JSONResponse({"error": f"{type(e).__name__}: {str(e)[:150]}"}, status_code=500)
+    return JSONResponse({"state": st, "events": events, "done": bool(st.get("done"))})
+
+
+@app.post("/render/search", response_class=HTMLResponse)
+async def render_search(request: Request):
+    """Render finished search state to the full results page (saves snapshot)."""
+    import uuid as _uuid
+
+    body = await request.json() or {}
+    st = body.get("state") or {}
+    result = st.get("result") or {}
+    cards = result.get("cards", [])
+    enrich(cards, request.state.visitor)
+    try:
+        run_id = store.save_run(st.get("role", ""), st.get("location", ""), st.get("mode", ""),
+                                cards, {"kind": "search", "brain": result.get("brain", ""),
+                                        "spent": result.get("spent", 0), "trace": result.get("trace", [])},
+                                visitor=request.state.visitor)
+    except Exception:
+        run_id = None
+    return templates.TemplateResponse(request, "results.html",
+                                      {"mode": st.get("mode", ""), "role": st.get("role", ""),
+                                       "location": st.get("location", ""), "cards": cards,
+                                       "errors": result.get("errors", []),
+                                       "summary": summarize(cards), "run_id": run_id,
+                                       "hide_risky": False, "hide_senior": False,
+                                       "brain": result.get("brain", ""),
+                                       "spent": result.get("spent", 0),
+                                       "budget": st.get("budget", 7),
+                                       "trace": result.get("trace", [])})
+
+
+@app.post("/render/verify", response_class=HTMLResponse)
+async def render_verify(request: Request):
+    """Render a finished paste verdict to the full verdict page (saves snapshot)."""
+    import uuid as _uuid
+
+    body = await request.json() or {}
+    st = body.get("state") or {}
+    result = st.get("result") or {}
+    if "card" not in result and "cards" not in result:
+        return templates.TemplateResponse(request, "index.html",
+                                          {"mode": "LIVE" if live_mode() else "FIXTURE",
+                                           "form_error": "That run didn't finish — try again."})
+    card = (result.get("cards") or [result.get("card")])[0] if result.get("cards") else result["card"]
+    _enrich_paste_card(card, request.state.visitor)
+    try:
+        run_id = store.save_run("pasted message", "—", st.get("mode", ""), [card],
+                                {"kind": "verify", "brain": result.get("brain", ""),
+                                 "spent": result.get("spent", 0), "trace": result.get("trace", [])},
+                                visitor=request.state.visitor)
+    except Exception:
+        run_id = None
+    return templates.TemplateResponse(request, "verdict.html",
+                                      {"mode": st.get("mode", ""), "card": card,
+                                       "errors": result.get("errors", []),
+                                       "trace": result.get("trace", []),
+                                       "spent": result.get("spent", 0),
+                                       "budget": st.get("budget", 3),
+                                       "brain": result.get("brain", ""),
+                                       "run_id": run_id, "idx": 0,
+                                       "thread_id": _uuid.uuid4().hex[:8], "thread": []})
 @app.post("/api/chat")
 async def chat_api(request: Request):
     body = await request.json() or {}
@@ -329,62 +415,12 @@ def run_detail(request: Request, rid: int):
                                        "budget": 7, "trace": meta.get("trace", [])})
 
 
-# ---------------- live progress streaming (SSE) ----------------
-# Slow runs (>10s on live data) get staged progress + skeletons, per NN/g
-# guidance: the checklist ticks on REAL agent milestones, never fake timers.
+# ---------------- stateless progress runs ----------------
+# The client drives the agent one step per HTTP call (/api/advance), carrying
+# state itself. Works on ANY serverless instance: no background threads, no
+# shared memory, no sticky sessions, no hangs. (An earlier SSE design died
+# here — instance A's worker was invisible to instance B's stream.)
 # Old /search + /verify routes keep working untouched (no-JS fallback).
-
-RUNS: dict[str, dict] = {}
-MAX_RUNS = 20
-
-
-def _start_run(kind: str, visitor: str = "anon", **kwargs) -> str:
-    import queue
-    import threading
-    import uuid
-
-    token = uuid.uuid4().hex[:10]
-    q: queue.Queue = queue.Queue()
-    RUNS[token] = {"kind": kind, "events": [], "result": None, "error": None, "queue": q}
-    while len(RUNS) > MAX_RUNS:
-        RUNS.pop(next(iter(RUNS)))
-
-    def emit(kind_, detail=""):
-        q.put({"kind": kind_, "detail": str(detail)[:120]})
-
-    def work():
-        try:
-            if kind == "search":
-                data = run_agent(kwargs["role"], kwargs["location"], emit=emit)
-                enrich(data["cards"], visitor)
-                try:
-                    data["run_id"] = store.save_run(kwargs["role"], kwargs["location"],
-                                                    data["mode"], data["cards"],
-                                                    {"kind": "search", "brain": data.get("brain", ""),
-                                                     "spent": data.get("spent", 0), "trace": data.get("trace", [])},
-                                                    visitor=visitor)
-                except Exception:
-                    data["run_id"] = None
-                data["summary"] = summarize(data["cards"])
-            else:
-                data = verify_paste(kwargs["text"], emit=emit)
-                if "card" in data:
-                    _enrich_paste_card(data["card"], visitor)
-                    try:
-                        data["run_id"] = store.save_run("pasted message", "—", data["mode"], [data["card"]],
-                                                        {"kind": "verify", "brain": data.get("brain", ""),
-                                                         "spent": data.get("spent", 0), "trace": data.get("trace", [])},
-                                                        visitor=visitor)
-                    except Exception:
-                        data["run_id"] = None
-            RUNS[token]["result"] = data
-            q.put({"kind": "done", "detail": token})
-        except Exception as e:  # noqa: BLE001 — background errors must surface, not vanish
-            RUNS[token]["error"] = f"{type(e).__name__}: {str(e)[:150]}"
-            q.put({"kind": "error", "detail": RUNS[token]["error"]})
-
-    threading.Thread(target=work, daemon=True).start()
-    return token
 
 
 def _enrich_paste_card(card: dict, visitor: str = "anon") -> None:
@@ -402,9 +438,9 @@ async def go_search(request: Request):
     form = dict(await request.form())
     role = (form.get("role") or "python").strip()[:80] or "python"
     location = (form.get("location") or "Bengaluru").strip()[:80] or "Bengaluru"
-    token = _start_run("search", request.state.visitor, role=role, location=location)
     return templates.TemplateResponse(request, "progress.html",
-                                      {"token": token, "title": f"{role} in {location}", "kind": "search"})
+                                      {"title": f"{role} in {location}", "kind": "search",
+                                       "role": role, "location": location, "text": ""})
 
 
 @app.post("/go/verify", response_class=HTMLResponse)
@@ -414,58 +450,6 @@ async def go_verify(request: Request):
     if not text:
         return templates.TemplateResponse(request, "index.html",
                                           {"mode": "LIVE" if live_mode() else "FIXTURE"})
-    token = _start_run("verify", request.state.visitor, text=text[:8000])
     return templates.TemplateResponse(request, "progress.html",
-                                      {"token": token, "title": "your message", "kind": "verify"})
-
-
-@app.get("/stream/{token}")
-async def stream_run(token: str):
-    from fastapi.responses import StreamingResponse
-
-    run = RUNS.get(token)
-    if not run:
-        async def empty():
-            yield 'event: error\ndata: {"detail": "unknown run"}\n\n'
-        return StreamingResponse(empty(), media_type="text/event-stream")
-
-    async def gen():
-        import asyncio
-        import json as _json
-
-        q = run["queue"]
-        while True:
-            try:
-                ev = await asyncio.to_thread(q.get, True, 25)
-            except Exception:
-                yield ": ping\n\n"
-                continue
-            run["events"].append(ev)
-            yield f"event: {ev['kind']}\ndata: {_json.dumps(ev)}\n\n"
-            if ev["kind"] in ("done", "error"):
-                break
-
-    return StreamingResponse(gen(), media_type="text/event-stream",
-                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
-
-
-@app.get("/view/{token}", response_class=HTMLResponse)
-async def view_run(request: Request, token: str):
-    import uuid as _uuid
-
-    run = RUNS.get(token)
-    if not run or not run.get("result"):
-        return templates.TemplateResponse(request, "index.html",
-                                          {"mode": "LIVE" if live_mode() else "FIXTURE",
-                                           "form_error": "That run isn't ready — try again."})
-    data = run["result"]
-    if run["kind"] == "search":
-        data = dict(data)
-        data["hide_risky"] = False
-        data["hide_senior"] = False
-        return templates.TemplateResponse(request, "results.html", data)
-    data = dict(data)
-    data["thread_id"] = _uuid.uuid4().hex[:8]
-    data["thread"] = []
-    data["idx"] = 0
-    return templates.TemplateResponse(request, "verdict.html", data)
+                                      {"title": "your message", "kind": "verify",
+                                       "role": "", "location": "", "text": text[:8000]})
