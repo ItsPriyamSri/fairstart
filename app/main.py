@@ -293,19 +293,18 @@ async def api_advance(request: Request):
     body = await request.json() or {}
     st = body.get("state") or {}
     try:
-        if not st or st.get("kind") == "search":
-            if not st:
-                st = new_search_state((body.get("role") or "python")[:80],
-                                      (body.get("location") or "Bengaluru")[:80])
+        if st:
             events = step(st)
-        elif st.get("kind") == "verify":
-            if "extracted" not in st and "text" not in st:
-                st = new_verify_state(body.get("text", ""))
-                if not (st.get("text") or "").strip():
-                    return JSONResponse({"error": "empty message"}, status_code=400)
+        elif "text" in body:
+            text = (body.get("text") or "").strip()
+            if not text:
+                return JSONResponse({"error": "empty message"}, status_code=400)
+            st = new_verify_state(text)
             events = step(st)
         else:
-            return JSONResponse({"error": "unknown run kind"}, status_code=400)
+            st = new_search_state((body.get("role") or "python")[:80],
+                                  (body.get("location") or "Bengaluru")[:80])
+            events = step(st)
     except Exception as e:  # noqa: BLE001 — a stuck run must explain, not hang
         return JSONResponse({"error": f"{type(e).__name__}: {str(e)[:150]}"}, status_code=500)
     return JSONResponse({"state": st, "events": events, "done": bool(st.get("done"))})
