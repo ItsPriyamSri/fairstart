@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Working on it · FairStart</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Plus+Jakarta+Sans:wght@600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/style.css">
+<link rel="icon" type="image/svg+xml" href="/static/logo.svg">
+</head>
+<body>
+<header class="nav"><div class="logo"><img src="/static/logo.svg" alt="FairStart" width="40" height="40"></div><div class="wordmark">Fair<span>Start</span></div><div class="spacer"></div><a class="pill-link" href="/">Home</a><a class="pill-link" href="/profile">Resume</a><a class="pill-link" href="/history">Snapshots</a></header>
+<section class="hero">
+<h1>On it — checking <span class="go">{{ title }}</span></h1>
+<p>The agent is working live. This usually takes about 20 seconds — watch it think below. Don't close this tab.</p>
+</section>
+<div class="panel">
+<h2>Live progress</h2>
+<ol class="stages" id="stages">
+<li data-stage="start"><span class="dot"></span><span class="lbl">Planning the checks</span></li>
+<li data-stage="search"><span class="dot"></span><span class="lbl">Searching live listings / reading your message</span></li>
+<li data-stage="verify"><span class="dot"></span><span class="lbl">Verifying across Jobs, News, Search and Forums</span></li>
+<li data-stage="judge"><span class="dot"></span><span class="lbl">Writing the verdict with proof attached</span></li>
+</ol>
+<p><small>Elapsed: <span id="elapsed">0</span>s · usually about 20 seconds</small></p>
+</div>
+<div aria-hidden="true">
+<div class="card"><div class="skel" style="height:1.2em;width:60%"></div><div class="skel" style="height:.8em;width:90%;margin-top:.6em"></div><div class="skel" style="height:.8em;width:75%;margin-top:.4em"></div></div>
+<div class="card"><div class="skel" style="height:1.2em;width:45%"></div><div class="skel" style="height:.8em;width:85%;margin-top:.6em"></div></div>
+</div>
+<script>
+(function () {
+  var t0 = Date.now();
+  var timer = setInterval(function () {
+    document.getElementById("elapsed").textContent = Math.round((Date.now() - t0) / 1000);
+  }, 500);
+  var order = ["start", "search", "verify", "judge"];
+  var reached = { start: true };
+  function paint() {
+    var seenActive = false;
+    order.forEach(function (stage) {
+      var el = document.querySelector('[data-stage="' + stage + '"]');
+      if (!el) return;
+      el.classList.remove("active", "done");
+      if (reached[stage] && !seenActive) {
+        // latest reached stage glows white; earlier ones rest green
+        var later = order.slice(order.indexOf(stage) + 1).some(function (s) { return reached[s]; });
+        el.classList.add(later ? "done" : "active");
+        if (!later) seenActive = true;
+      } else if (reached[stage]) {
+        el.classList.add("done");
+      }
+    });
+  }
+  function tick(stage) {
+    reached[stage] = true;
+    paint();
+  }
+  paint();
+  var es = new EventSource("/stream/{{ token }}");
+  es.onmessage = function () {};
+  es.addEventListener("tool", function (e) { tick("search"); });
+  es.addEventListener("fanout", function (e) { tick("search"); tick("verify"); });
+  es.addEventListener("extract", function (e) { tick("search"); });
+  es.addEventListener("plan", function (e) { tick("search"); });
+  es.addEventListener("validate", function (e) { tick("verify"); tick("judge"); });
+  es.addEventListener("reflect", function (e) { tick("judge"); });
+  es.addEventListener("synthesis", function (e) { tick("judge"); });
+  es.addEventListener("deny", function (e) { tick("judge"); });
+  es.addEventListener("done", function () {
+    clearInterval(timer);
+    order.forEach(function (s) { reached[s] = true; });
+    paint();
+    setTimeout(function () { window.location.href = "/view/{{ token }}"; }, 450);
+  });
+  es.addEventListener("error", function (e) {
+    try {
+      var d = JSON.parse(e.data || "{}");
+      if (d.detail && d.detail !== "unknown run") {
+        clearInterval(timer);
+        document.querySelector(".panel").insertAdjacentHTML("beforeend",
+          '<p class="err">Something broke: ' + d.detail + ' — <a href="/">try again</a></p>');
+        es.close();
+      }
+    } catch (err) { /* SSE retry heartbeat; ignore */ }
+  });
+})();
+</script>
+</body>
+</html>

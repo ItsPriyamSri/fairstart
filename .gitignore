@@ -1,0 +1,13 @@
+.env
+.env.*
+*.sqlite
+__pycache__/
+*.pyc
+.pytest_cache/
+*.log
+# build-internal (never public)
+.private/
+serpapi-hackathon-prompt.txt
+docs/proposal.md
+docs/ponytail-review.md
+docs/submission-checklist.md

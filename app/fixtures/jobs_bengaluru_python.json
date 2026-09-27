@@ -1,0 +1,57 @@
+{
+  "search_metadata": {"status": "Success", "note": "RECORDED FIXTURE — not live results"},
+  "jobs_results": [
+    {
+      "title": "Python Developer (Fresher)",
+      "company_name": "Nimbuspark Technologies",
+      "location": "Bengaluru, Karnataka",
+      "via": "Indeed",
+      "share_link": "https://www.google.com/search?ibp=htl;jobs&q=python+fresher#b1",
+      "extensions": ["2 days ago"],
+      "detected_extensions": {"posted_at": "2 days ago", "salary": "3-4.5 LPA", "schedule_type": "Full-time"},
+      "description": "Freshers welcome. Python, Django basics. Apply via portal. No fees.",
+      "job_highlights": [{"title": "Qualifications", "items": ["0-1 years", "Python basics"]}],
+      "apply_options": [{"title": "Indeed", "link": "https://example.com/apply/nimbuspark-python"}],
+      "job_id": "fix-001"
+    },
+    {
+      "title": "Software Developer HCL Hiring Freshers",
+      "company_name": "HCL Technologies",
+      "location": "Bengaluru, Karnataka",
+      "via": "UnknownBoard",
+      "share_link": "https://www.google.com/search?ibp=htl;jobs&q=hcl+fresher#b2",
+      "extensions": ["3 days ago"],
+      "detected_extensions": {"posted_at": "3 days ago", "salary": "7.5 LPA"},
+      "description": "HCL hiring freshers! Telephonic interview only. Pay refundable registration fee Rs 2000 to get interview ID. Send resume to hclfastservice@gmail.com and WhatsApp your documents.",
+      "job_highlights": [{"title": "Qualifications", "items": ["Any fresher can apply"]}],
+      "apply_options": [],
+      "job_id": "fix-002"
+    },
+    {
+      "title": "Python Developer (Fresher)",
+      "company_name": "Nimbuspark Technologies",
+      "location": "Bengaluru, Karnataka",
+      "via": "SimplyHired",
+      "share_link": "https://www.google.com/search?ibp=htl;jobs&q=python+fresher#b3",
+      "extensions": ["5 days ago"],
+      "detected_extensions": {"posted_at": "5 days ago", "salary": "3-4.5 LPA"},
+      "description": "Freshers welcome. Python, Django basics. Apply via portal.",
+      "job_highlights": [{"title": "Qualifications", "items": ["0-1 years"]}],
+      "apply_options": [{"title": "SimplyHired", "link": "https://example.com/apply/nimbuspark-2"}],
+      "job_id": "fix-003"
+    },
+    {
+      "title": "Junior Backend Engineer",
+      "company_name": "",
+      "location": "Hyderabad, Telangana",
+      "via": "TelegramChannel",
+      "share_link": "https://www.google.com/search?ibp=htl;jobs&q=backend+fresher#b4",
+      "extensions": [],
+      "detected_extensions": {},
+      "description": "Urgent hiring! 45 days old posting re-shared. Best fit for all. Multiple locations. Salary 12 LPA for freshers. WhatsApp apply only, pay bond security 6800 refundable.",
+      "job_highlights": [],
+      "apply_options": [],
+      "job_id": "fix-004"
+    }
+  ]
+}

@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Verdict · FairStart</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Plus+Jakarta+Sans:wght@600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/style.css">
+<link rel="icon" type="image/svg+xml" href="/static/logo.svg">
+</head>
+<body class="{{ card.band }}">
+<header class="nav"><div class="logo"><img src="/static/logo.svg" alt="FairStart" width="40" height="40"></div><div class="wordmark">Fair<span>Start</span></div><div class="spacer"></div><a class="pill-link" href="/">Home</a><a class="pill-link" href="/profile">Resume</a><a class="pill-link" href="/history">Snapshots</a></header>
+<p><a class="btn ghost btn-sm" href="/">← New check</a> <a class="btn ghost btn-sm" href="/history">Snapshots</a> <span class="mode">{{ mode }}</span></p>
+{% if mode.startswith("FIXTURE") %}<p><strong>Sample results for demo.</strong> Not live data.</p>{% endif %}
+{% for e in errors %}<p class="err">{{ e }}</p>{% endfor %}
+<div class="banner"><div class="verdict-grid">
+<svg class="gauge" viewBox="0 0 120 120" role="img" aria-label="risk score {{ card.score }} of 100">
+<circle class="track" cx="60" cy="60" r="52" fill="none" stroke-width="10"/>
+<circle class="value" cx="60" cy="60" r="52" fill="none" stroke-width="10" stroke-dasharray="326.7" stroke-dashoffset="{{ '%.1f'|format(326.7 * (1 - card.score / 100.0)) }}"/>
+<text x="60" y="58" text-anchor="middle" font-size="24">{{ card.score }}</text>
+<text x="60" y="76" text-anchor="middle" font-size="11" opacity="0.7">/ 100 risk</text>
+</svg>
+<div><h1>{{ card.label }}</h1>
+<p>{{ card.company or "No company named" }}{% if card.claims.money %} · mentions {{ card.claims.money|join(", ") }}{% endif %}{% if card.source_url %}<br><small>Judged from: <a href="{{ card.source_url }}" style="color:#fff">{{ card.source_url[:70] }} ↗</a></small>{% endif %}</p></div>
+</div></div>
+{% if card.coach and card.coach.opener %}<p><em>{{ card.coach.opener }}</em></p>{% endif %}
+<h2>Why I think so</h2>
+<ul>{% for r in card.summary.bullets %}<li>{{ r }}</li>{% endfor %}</ul>
+<h2>Exact lines that worry me</h2>
+{% if card.claims.cues %}{% for c in card.claims.cues %}<div class="claim"><strong>{{ c.cue }}</strong> <small>({{ c.family }})</small><br><q>{{ c.quote }}</q></div>{% endfor %}
+{% else %}<p>No classic scam or exploitation cues in the wording — verdict rests on company verification below.</p>{% endif %}
+<h2>What you could lose</h2>
+{% if card.coach and card.coach.cons %}<ul>{% for c in card.coach.cons %}<li>{{ c.con }} <small><q>{{ c.quote }}</q></small></li>{% endfor %}</ul>
+{% else %}<p>No specific losses flagged beyond the score above — still verify before committing time or documents.</p>{% endif %}
+{% if card.coach and card.coach.closer %}<p><em>{{ card.coach.closer }}</em></p>{% endif %}
+<div class="ev">
+<h3>Proof I checked (original links)</h3>
+{% for n in card.evidence.news %}<p>Thread/report: <a href="{{ n.link }}">{{ n.title }} ({{ n.source.name }}) ↗</a></p>{% endfor %}
+{% for o in card.evidence.presence %}<p>Presence: <a href="{{ o.link }}">{{ o.title }} ↗</a></p>{% endfor %}
+{% if not card.evidence.news and not card.evidence.presence %}<p>No verifiable footprint found for this name — that itself is a warning sign.</p>{% endif %}
+</div>
+<h2>What to do next</h2>
+<ul>{% for s in card.next_steps %}<li>{% if s.link %}<a href="{{ s.link }}">{{ s.text }} ↗</a>{% else %}{{ s.text }}{% endif %}</li>{% endfor %}</ul>
+{% if card.band == "red" and card.search_link %}
+<div class="ev">
+<h3><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-3px"><path d="M4.5 16.5c-1.5 1.26-2 5-2 5s3.74-.5 5-2c.71-.84.7-2.13-.09-2.91a2.18 2.18 0 0 0-2.91-.09z"/><path d="m12 15-3-3a22 22 0 0 1 2-3.95A12.88 12.88 0 0 1 22 2c0 2.72-.78 7.5-6 11a22.35 22.35 0 0 1-4 2z"/><path d="M9 12H4s.55-3.03 2-4c1.62-1.08 5 0 5 0"/><path d="M12 15v5s3.03-.55 4-2c1.08-1.62 0-5 0-5"/></svg> Don't stop here — get a REAL one instead</h3>
+<p>This one isn't safe, but that doesn't mean good {{ card.search_role }} roles don't exist. <a href="{{ card.search_link }}"><strong>See verified {{ card.search_role }} jobs →</strong></a>{% if card.match and card.match.pct is not none %} Your resume matches this field at {{ card.match.pct }}% — take that with you.{% endif %}</p>
+</div>
+{% endif %}
+{% if (card.band == "green" or card.label == "LIKELY GENUINE") and card.prep %}
+<div class="ev">
+<h3><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-3px"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg> Interview prep: {{ card.prep_role }}</h3>
+<p><small>{{ card.prep|join(" · ") }}</small></p>
+{% if card.match and card.match.pct is not none %}<p><small>Fit: {{ card.match.pct }}% ({{ card.match.note }}){% if card.match.missing %} · Close first: <strong>{{ card.match.missing[:3]|join(", ") }}</strong>{% endif %}</small></p>{% endif %}
+<p><small>Ask me in chat for a 7-day plan or practice questions.{% if not card.match %} <a href="/profile">Upload your resume</a> for personal Match%.{% endif %}</small></p>
+</div>
+{% endif %}
+<h2>Talk it through <span style="font-size:.8rem">(push back, ask why, dig deeper — safe space, no judgment)</span></h2>
+<div class="chat-shell">
+<div class="chat-head"><div class="avatar">G</div><div><div class="who">Guardian</div><div class="status">online · answers from your evidence only</div></div></div>
+<div class="chat" id="thread">
+{% if thread %}{% for m in thread %}
+<div class="bubble-row you"><div class="bubble md"><span class="who">You</span><div data-md>{{ m.q }}</div></div></div>
+<div class="bubble-row senior"><div class="bubble md"><span class="who">Guardian</span><div data-md>{{ m.a }}</div> <span class="via">({{ m.via }})</span></div></div>
+{% endfor %}{% endif %}
+</div>
+<form action="/chat" method="post" id="chat-form" class="chat-form" data-run-id="{{ run_id or 0 }}" data-idx="{{ idx or 0 }}" data-thread-id="{{ thread_id or 't0' }}">
+<input type="hidden" name="run_id" value="{{ run_id or 0 }}">
+<input type="hidden" name="idx" value="{{ idx or 0 }}">
+<input type="hidden" name="thread_id" value="{{ thread_id or 't0' }}">
+<label class="sr-only">Ask a follow-up</label>
+<input name="question" value="" maxlength="1000" autocomplete="off" placeholder="e.g. But my friend actually got paid — could it still be real?">
+<button type="submit">Ask →</button>
+</form>
+</div>
+<p><small>Tip: try "why?", "I already paid, what now?", "their website looks real though?", "find me real jobs", "make me a study plan", "quiz me" — answers come only from the evidence above.</small></p>
+<details><summary>How I checked this ({{ trace|length }} steps)</summary>
+<ol class="trace">{% for t in trace %}<li>{{ t.kind }}{% if t.tool %}: <code>{{ t.tool }} {{ t.args }}</code>{% endif %}{% if t.note %} — {{ t.note }}{% endif %}</li>{% endfor %}</ol>
+</details>
+<script src="/static/app.js"></script>
+</body>
+</html>

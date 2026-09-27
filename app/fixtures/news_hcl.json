@@ -1,0 +1,13 @@
+{
+  "search_metadata": {"status": "Success", "note": "RECORDED FIXTURE — not live results"},
+  "news_results": [
+    {
+      "position": 1,
+      "title": "Job seekers warned against fake HCL recruitment fee scam",
+      "source": {"name": "Example News"},
+      "link": "https://example.com/news/fake-hcl-fee-scam",
+      "date": "12/08/2026",
+      "iso_date": "2026-08-12T00:00:00Z"
+    }
+  ]
+}

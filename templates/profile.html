@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Your resume · FairStart</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Plus+Jakarta+Sans:wght@600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/style.css">
+<link rel="icon" type="image/svg+xml" href="/static/logo.svg">
+</head>
+<body>
+<header class="nav"><div class="logo"><img src="/static/logo.svg" alt="FairStart" width="40" height="40"></div><div class="wordmark">Fair<span>Start</span></div><div class="spacer"></div><a class="pill-link" href="/">Home</a><a class="pill-link" href="/profile">Resume</a><a class="pill-link" href="/history">Snapshots</a></header>
+<p><a class="btn ghost btn-sm" href="/">← Home</a></p>
+<h1>Your resume, your Match%</h1>
+<p>Upload your resume PDF (max 2MB, 5 pages). It is <strong>stored only on this machine</strong> — never sent to SerpApi. With it, every job shows a <strong>Match%</strong> (skills overlap, separate from trust) plus your skill gaps and interview topics.</p>
+{% if form_error %}<p class="err">{{ form_error }}</p>{% endif %}
+{% if saved %}<p class="ok">Saved. New searches will show Match% + gaps + prep. Re-upload anytime to update.</p>{% endif %}
+<form action="/profile" method="post" enctype="multipart/form-data">
+<label>Resume PDF <input type="file" name="resume" accept=".pdf,application/pdf"></label>
+<button type="submit">Upload</button>
+</form>
+{% if profile %}
+<h2>Detected skills ({{ profile.skills|length }}) · level: {{ profile.level }}</h2>
+<p>{% for s in profile.skills %}<span class="pill">{{ s }}</span>{% endfor %}</p>
+<p><small>From {{ profile.filename }}. Wrong skills? Re-upload a text-based PDF (scanned images can't be read).</small></p>
+{% endif %}
+</body>
+</html>

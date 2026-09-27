@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Job results · FairStart</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Plus+Jakarta+Sans:wght@600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/style.css">
+<link rel="icon" type="image/svg+xml" href="/static/logo.svg">
+</head>
+<body>
+<header class="nav"><div class="logo"><img src="/static/logo.svg" alt="FairStart" width="40" height="40"></div><div class="wordmark">Fair<span>Start</span></div><div class="spacer"></div><a class="pill-link" href="/">Home</a><a class="pill-link" href="/profile">Resume</a><a class="pill-link" href="/history">Snapshots</a></header>
+<p><a class="btn ghost btn-sm" href="/">← New search</a> <a class="btn ghost btn-sm" href="/history">Snapshots</a> <span class="mode">{{ mode }}</span></p>
+<h1>{{ role }} — {{ location }}</h1>
+{% if mode.startswith("FIXTURE") %}<p><strong>Sample results for demo.</strong> Not live data.</p>{% endif %}
+{% for e in errors %}<p class="err">{{ e }}</p>{% endfor %}
+<section aria-label="agent trace" id="how">
+<p><small>Checked by <strong>{{ brain }}</strong> · <a href="#how-steps">see each step ↓</a>
+<details id="how-steps"><summary>See each step ({{ trace|length }})</summary>
+<ol class="trace">{% for t in trace %}<li>{{ t.kind }}{% if t.tool %}: <code>{{ t.tool }}</code>{% endif %}{% if t.note %} — {{ t.note }}{% endif %}</li>{% endfor %}</ol>
+</details></small></p>
+</section>
+<section aria-label="result summary">
+<p>🟢 {{ summary.dist.green }} safe &nbsp; 🟡 {{ summary.dist.amber }} check &nbsp; 🔴 {{ summary.dist.red }} high-risk
+{% if summary.median_lpa %} · median {{ summary.median_lpa }} LPA{% endif %}
+{% if summary.freshest_days is not none %} · freshest {{ summary.freshest_days }}d ago{% endif %}
+{% if summary.stale_n %} · {{ summary.stale_n }} stale (&gt;30d){% endif %}</p>
+<p><small>
+<a href="/search?role={{ role }}&location={{ location }}{% if hide_senior %}&hide_senior=1{% endif %}{% if not hide_risky %}&hide_risky=1{% else %}{% endif %}">{% if hide_risky %}show high-risk{% else %}hide high-risk{% endif %}</a> ·
+<a href="/search?role={{ role }}&location={{ location }}{% if hide_risky %}&hide_risky=1{% endif %}{% if not hide_senior %}&hide_senior=1{% else %}{% endif %}">{% if hide_senior %}show senior roles{% else %}hide senior roles{% endif %}</a>
+{% if run_id %} · <a href="/export.csv?role={{ role }}&run_id={{ run_id }}">download CSV</a> · saved (#{{ run_id }}){% endif %}
+</small></p>
+</section>
+{% if not cards %}<p>Nothing found. Try a simpler job title or another city.</p>{% endif %}
+{% for c in cards %}
+<article class="card {{ c.band }}" aria-label="{{ c.title }} risk {{ c.score }}">
+<p class="sigil">{% if c.band == "green" %}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-3.6 8-10V5l-8-3-8 3v7c0 6.4 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg>Looks safe{% elif c.band == "amber" %}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3z"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg>Check first{% else %}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 8v4"/><path d="M12 16h.01"/></svg>High risk{% endif %}</p>
+<h2>{{ c.title }} <span class="badge">{{ c.score }}/100</span></h2>
+<p><strong>{{ c.company or "Company not listed" }}</strong> · {{ c.location }} · via {{ c.via or "unknown" }} · {{ c.posted_at or "date unknown" }}{% if c.get("_dupes", 1) > 1 %} · ×{{ c._dupes }} reposts{% endif %}</p>
+<h3>Why this score</h3>
+<ul>{% for r in c.summary.bullets %}<li>{{ r }}</li>{% endfor %}</ul>
+<p><small class="generated">{{ c.summary.note }}</small></p>
+{% if c.match and c.match.pct is not none %}
+<h3>Your fit: {{ c.match.pct }}% Match <span class="generated">(skills overlap — separate from trust)</span></h3>
+<p><small>✅ You have: {{ c.match.have|join(", ") or "—" }}<br>
+{% if c.match.missing %}📚 Gaps to close: <strong>{{ c.match.missing|join(", ") }}</strong>{% else %}No skill gaps detected in this JD. 🎉{% endif %}</small></p>
+{% elif c.match %}
+<p><small>Match%: {{ c.match.note }}</small></p>
+{% else %}
+<p><small><a href="/profile">Upload your resume</a> to see Match% + skill gaps on every job.</small></p>
+{% endif %}
+{% if c.band == "green" %}
+<h3>Interview prep: {{ c.prep_role }}</h3>
+<p><small>Start here: {{ c.prep|join(" · ") }}<br>Paste any JD in the verify box for a 7-day prep plan + practice questions in chat.</small></p>
+{% endif %}
+<div class="ev">
+<h3>Proof I checked</h3>
+{% if c.share_link %}<p><a href="{{ c.share_link }}">Google Jobs listing ↗</a></p>{% endif %}
+{% for a in c.apply %}<p><a href="{{ a.link }}">Apply via {{ a.title }} ↗</a></p>{% endfor %}
+{% for n in c.evidence.news %}<p>News: <a href="{{ n.link }}">{{ n.title }} ({{ n.source.name }}) ↗</a></p>{% endfor %}
+{% for o in c.evidence.presence %}<p>Presence: <a href="{{ o.link }}">{{ o.title }} ↗</a></p>{% endfor %}
+{% if not c.apply and not c.evidence.news and not c.evidence.presence %}<p>No links to check here — be extra careful with this one.</p>{% endif %}
+</div>
+</article>
+{% endfor %}
+</body>
+</html>

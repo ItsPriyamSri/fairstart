@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Snapshots · FairStart</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Plus+Jakarta+Sans:wght@600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/style.css">
+<link rel="icon" type="image/svg+xml" href="/static/logo.svg">
+</head>
+<body>
+<header class="nav"><div class="logo"><img src="/static/logo.svg" alt="FairStart" width="40" height="40"></div><div class="wordmark">Fair<span>Start</span></div><div class="spacer"></div><a class="pill-link" href="/">Home</a><a class="pill-link" href="/profile">Resume</a><a class="pill-link" href="/history">Snapshots</a></header>
+<p><a class="btn ghost btn-sm" href="/">← New search</a></p>
+<h1>Your past checks</h1>
+<p><small>Every search and verdict, with its chat. Tap one to reopen the exact same page.</small></p>
+{% if missing %}<p>No saved check #{{ missing }}.</p>{% endif %}
+{% if not runs %}<p>No saved checks yet — run a search or judge a message first. Everything is saved on this device.</p>{% endif %}
+<ul>
+{% for r in runs %}
+<li><a href="/history/{{ r.id }}">#{{ r.id }} {% if r.kind == "verify" %}Verdict{% else %}Search{% endif %}: {{ r.role }}{% if r.location != "—" %} — {{ r.location }}{% endif %}</a>
+<small>{{ r.n }} result{{ "s" if r.n != 1 }}, {{ r.red }} high-risk · {{ r.mode }}</small></li>
+{% endfor %}
+</ul>
+</body>
+</html>
