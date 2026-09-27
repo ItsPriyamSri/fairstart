@@ -250,6 +250,16 @@ button:disabled { opacity: 0.6; cursor: wait; transform: none; }
 .md h1, .md h2, .md h3 { font-size: 1em; margin: 0.5em 0 0.25em; }
 
 /* misc */
+.chips { display: flex; flex-wrap: wrap; gap: 0.45rem; margin: 0.1rem 0 0.5rem; }
+.chip {
+  margin-top: 0 !important; padding: 0.4rem 0.85rem !important;
+  font-size: 0.82rem !important; font-weight: 600 !important;
+  background: transparent !important; color: var(--ink) !important;
+  border: 1px solid var(--line) !important; border-radius: 999px !important;
+  box-shadow: none !important; cursor: pointer;
+}
+.chip:hover { border-color: var(--mint) !important; color: var(--mint) !important; transform: translateY(-1px); }
+.chip::after { display: none !important; }
 .retrieved { color: #6ee7b7; }
 .generated { color: #fbbf24; }
 .pill { display: inline-block; background: rgba(16, 185, 129, 0.14); border: 1px solid rgba(16, 185, 129, 0.35); border-radius: 999px; padding: 0.15rem 0.65rem; margin: 0.15rem; font-size: 0.85rem; }
