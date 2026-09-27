@@ -15,11 +15,13 @@
 <p><small>Every search and verdict, with its chat. Tap one to reopen the exact same page.</small></p>
 {% if missing %}<p>No saved check #{{ missing }}.</p>{% endif %}
 {% if not runs %}<p>No saved checks yet — run a search or judge a message first. Everything is saved on this device.</p>{% endif %}
-<ul>
+<ul id="history-list">
 {% for r in runs %}
-<li><a href="/history/{{ r.id }}">#{{ r.id }} {% if r.kind == "verify" %}Verdict{% else %}Search{% endif %}: {{ r.role }}{% if r.location != "—" %} — {{ r.location }}{% endif %}</a>
+<li data-run-id="{{ r.id }}" data-kind="{{ r.kind or '' }}"><a href="/history/{{ r.id }}">#{{ r.id }} {% if r.kind == "verify" %}Verdict{% else %}Search{% endif %}: {{ r.role }}{% if r.location != "—" %} — {{ r.location }}{% endif %}</a>
 <small>{{ r.n }} result{{ "s" if r.n != 1 }}, {{ r.red }} high-risk · {{ r.mode }}</small></li>
 {% endfor %}
 </ul>
+<p><small>Saved on this device too — your checks survive redeploys and reopen exactly as they looked.</small></p>
+<script src="/static/app.js"></script>
 </body>
 </html>

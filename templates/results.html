@@ -63,5 +63,7 @@
 </div>
 </article>
 {% endfor %}
+<script type="application/json" id="run-data">{{ {"run_id": run_id, "kind": "search", "role": role, "location": location, "mode": mode, "cards": cards, "brain": brain, "spent": spent, "trace": trace}|tojson }}</script>
+<script src="/static/app.js"></script>
 </body>
 </html>

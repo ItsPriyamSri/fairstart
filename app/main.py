@@ -310,6 +310,37 @@ async def api_advance(request: Request):
     return JSONResponse({"state": st, "events": events, "done": bool(st.get("done"))})
 
 
+@app.post("/render/local", response_class=HTMLResponse)
+async def render_local(request: Request):
+    """Reopen a browser-cached run: same full UI, enriched with this visitor's
+    current profile. Survives redeploys, recycles, and dead server DBs."""
+    body = await request.json() or {}
+    snap = body.get("snapshot") or {}
+    cards = snap.get("cards") or []
+    if not cards:
+        return templates.TemplateResponse(request, "index.html",
+                                          {"mode": "LIVE" if live_mode() else "FIXTURE",
+                                           "form_error": "That saved check is empty — run a fresh one."})
+    enrich(cards, request.state.visitor)
+    if snap.get("kind") == "verify":
+        import uuid as _uuid
+
+        card = cards[0]
+        return templates.TemplateResponse(request, "verdict.html",
+                                          {"mode": snap.get("mode", ""), "card": card,
+                                           "errors": [], "trace": snap.get("trace", []),
+                                           "spent": snap.get("spent", 0), "budget": 3,
+                                           "brain": snap.get("brain", ""),
+                                           "run_id": snap.get("run_id"), "idx": 0,
+                                           "thread_id": _uuid.uuid4().hex[:8], "thread": []})
+    return templates.TemplateResponse(request, "results.html",
+                                      {"mode": snap.get("mode", ""), "role": snap.get("role", ""),
+                                       "location": snap.get("location", ""), "cards": cards,
+                                       "errors": [], "summary": summarize(cards),
+                                       "run_id": snap.get("run_id"), "hide_risky": False,
+                                       "hide_senior": False, "brain": snap.get("brain", ""),
+                                       "spent": snap.get("spent", 0), "budget": 7,
+                                       "trace": snap.get("trace", [])})
 @app.post("/render/search", response_class=HTMLResponse)
 async def render_search(request: Request):
     """Render finished search state to the full results page (saves snapshot)."""

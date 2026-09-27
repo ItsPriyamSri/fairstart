@@ -79,14 +79,68 @@
   var input = form.querySelector('input[name="question"]');
   var btn = form.querySelector("button");
 
-  // session-local thread cache: survives reloads/back-nav within this tab
-  // session. Server thread wins; session only fills messages the server
-  // hasn't rendered (JS-sent exchanges). Keyed per thread.
+  // ---- local history mirror: every verdict/search saved on-device ----
+  // Survives redeploys, recycles, dead server DBs. Server history stays the
+  // source for deltas/exports; this mirror guarantees reopen always works.
+  try {
+    var runDataEl = document.getElementById("run-data");
+    if (runDataEl) {
+      var snap = JSON.parse(runDataEl.textContent || "{}");
+      if (snap.cards && snap.cards.length) {
+        var key = "fs-history";
+        var hist = JSON.parse(localStorage.getItem(key) || "[]");
+        var id = snap.run_id != null ? "srv-" + snap.run_id : "local-" + Date.now();
+        hist = hist.filter(function (h) { return h.id !== id; });
+        hist.unshift({
+          id: id, ts: Date.now(), kind: snap.kind || "",
+          role: snap.role || "", location: snap.location || "",
+          mode: snap.mode || "", snapshot: snap
+        });
+        localStorage.setItem(key, JSON.stringify(hist.slice(0, 30)));
+      }
+    }
+  } catch (e) { /* private mode: mirror off, server history still works */ }
+
+  // ---- history merge: append on-device checks missing from the server list ----
+  try {
+    var list = document.getElementById("history-list");
+    if (list) {
+      var seen = {};
+      list.querySelectorAll("[data-run-id]").forEach(function (li) {
+        seen["srv-" + li.dataset.runId] = true;
+      });
+      var hist2 = JSON.parse(localStorage.getItem("fs-history") || "[]");
+      hist2.slice().reverse().forEach(function (h) {
+        if (seen[h.id]) return;
+        var li = document.createElement("li");
+        var a = document.createElement("a");
+        a.href = "#";
+        var label = (h.kind === "verify" ? "Verdict" : "Search") + ": " + (h.role || "pasted message");
+        a.textContent = label;
+        a.addEventListener("click", function (ev) {
+          ev.preventDefault();
+          fetch("/render/local", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ snapshot: h.snapshot })
+          })
+            .then(function (r) { return r.text(); })
+            .then(function (html) { document.open(); document.write(html); document.close(); });
+        });
+        li.appendChild(a);
+        var small = document.createElement("small");
+        var reds = (h.snapshot.cards || []).filter(function (c) { return c.band === "red"; }).length;
+        small.textContent = " " + (h.snapshot.cards || []).length + " result(s), " + reds + " high-risk · on this device";
+        li.appendChild(small);
+        list.appendChild(li);
+      });
+    }
+  } catch (e) { /* ignore */ }
   var tid = form.dataset.threadId || "t0";
   var skey = "fs-thread-" + tid;
   function loadSession() {
     try {
-      var items = JSON.parse(sessionStorage.getItem(skey) || "[]");
+      var items = JSON.parse(localStorage.getItem(skey) || sessionStorage.getItem(skey) || "[]");
       var have = box.querySelectorAll(".bubble-row.senior").length;
       items.slice(have).forEach(function (m) {
         box.appendChild(bubble("You", md(m.q || ""), ""));
@@ -96,9 +150,9 @@
   }
   function saveSession(q, a, via) {
     try {
-      var items = JSON.parse(sessionStorage.getItem(skey) || "[]");
+      var items = JSON.parse(localStorage.getItem(skey) || sessionStorage.getItem(skey) || "[]");
       items.push({ q: q, a: a, via: via });
-      sessionStorage.setItem(skey, JSON.stringify(items.slice(-30)));
+      localStorage.setItem(skey, JSON.stringify(items.slice(-30)));
     } catch (e) { /* ignore */ }
   }
   loadSession();

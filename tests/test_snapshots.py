@@ -152,3 +152,30 @@ def test_visitor_isolation(tmp_path, monkeypatch):
     _store.save_profile("r.pdf", ["python"], "fresher", "x" * 300, visitor="v-a")
     assert _store.get_profile("v-b") is None
     assert _store.get_profile("v-a")["skills"] == ["python"]
+
+
+def test_render_local_roundtrip():
+    """Browser-cached snapshots reopen to full UI without any server DB row."""
+    from app.agent import verify_paste
+    from app.main import run_pipeline
+
+    d = run_pipeline("python", "Bengaluru")
+    snap = {"kind": "search", "role": "python", "location": "Bengaluru",
+            "mode": d["mode"], "cards": d["cards"], "brain": d["brain"],
+            "spent": d["spent"], "trace": d["trace"], "run_id": None}
+    page = client.post("/render/local", json={"snapshot": snap}).text
+    assert "Why this score" in page and 'id="run-data"' in page
+    v = verify_paste("hello world test message about a job")
+    snap2 = {"kind": "verify", "mode": v["mode"], "cards": [v["card"]],
+             "brain": v["brain"], "spent": v["spent"], "trace": v["trace"], "run_id": None}
+    page2 = client.post("/render/local", json={"snapshot": snap2}).text
+    assert "Why I think so" in page2 and 'id="chat-form"' in page2
+    empty = client.post("/render/local", json={"snapshot": {"cards": []}})
+    assert empty.status_code == 200 and "empty" in empty.text
+
+
+def test_history_merge_hooks():
+    hist = client.get("/history").text
+    assert 'id="history-list"' in hist and "data-run-id" in hist or "No saved checks yet" in hist
+    assert "fs-history" in open("static/app.js").read()
+    assert "localStorage" in open("static/app.js").read()
